@@ -2,6 +2,7 @@ import cv2
 import tensorflow as tf
 import copy
 import numpy as np
+import csv
 
 def non_max_suppression_fast(boxes, probabilities=None, overlap_threshold=0.3):
     """
@@ -69,6 +70,14 @@ def non_max_suppression_fast(boxes, probabilities=None, overlap_threshold=0.3):
     return pick
 
 def inference(img, input_size, interpreter):
+
+     # reading the SSD anchors
+    anchors_path = 'anchors.csv'
+    with open(anchors_path, "r") as csv_f:
+        anchors = np.r_[
+            [x for x in csv.reader(csv_f, quoting=csv.QUOTE_NONNUMERIC)]
+        ]
+
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     img = cv2.resize(img, dsize=(input_size, input_size))
     img = img.astype(np.float32)
@@ -91,23 +100,28 @@ def inference(img, input_size, interpreter):
     P = 1/(1 + np.exp(-out_clf))
     detecion_mask = P > 0.5
     candidate_detect = out_reg[detecion_mask]
-    #candidate_anchors = anchors[detecion_mask]
+    print(np.shape(anchors[2016]))
+    candidate_anchors = anchors[detecion_mask]
     P = P[detecion_mask]
 
     moved_candidate_detect = candidate_detect.copy()
+    moved_candidate_detect[:, :2] = candidate_detect[:, :2] + (candidate_anchors[:, :2] * 256)
     box_ids = non_max_suppression_fast(moved_candidate_detect[:, :4], P)
 
-    #dx,dy,w,h = candidate_detect[box_ids, 0:4]
-    print(candidate_detect)
-    #center_wo_offst = (box_ids,:2) * 256
+    # Pick the first detected hand. Could be adapted for multi hand recognition
+    box_ids = box_ids[0]
+
+    # bounding box offsets, width and height
+    dx,dy,w,h = candidate_detect[box_ids, :4]
+    center_wo_offst = candidate_anchors[box_ids,:2] * 256
 
     # 7 initial keypoints
-    #keypoints = center_wo_offst + candidate_detect[box_ids,4:].reshape(-1,2)
-    side = max(w,h)
+    keypoints = center_wo_offst + candidate_detect[box_ids,4:].reshape(-1,2)
+    side = max(w,h) * 1.5
 
+    print(keypoints[0], keypoints[1])
 
-
-    return 0, 0
+    return dx, dy
 
 
 cap_device = 0
@@ -128,11 +142,10 @@ ret, frame = cap.read()
 
 img = copy.deepcopy(frame)
 
-output1, output2 = inference(img, input_size, interpreter)
-print(output1)
-print(np.shape(output1))
-print(output2)
-print(np.shape(output2))
+dx, dy = inference(img, input_size, interpreter)
+
+cv2.circle(img, (int(196+dx*196), int(dy*196)), 4, (255, 255, 0), -1)
+
 
 
 while True:

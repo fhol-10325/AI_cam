@@ -29,7 +29,7 @@ with mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5) a
 
         # To improve performance, mark the image as not writeable to pass by reference
         image.flags.writeable = False
-        #hand_results = hands.process(image)
+        hand_results = hands.process(image)
         pose_results = pose.process(image)
 
         # Draw the hand and pose annotations on the image
@@ -37,10 +37,10 @@ with mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5) a
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
         # Draw hand landmarks
-        '''if hand_results.multi_hand_landmarks:
+        if hand_results.multi_hand_landmarks:
             for hand_landmarks in hand_results.multi_hand_landmarks:
                 mp_drawing.draw_landmarks(image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-        '''
+        
         # Draw pose landmarks
         if pose_results.pose_landmarks:
             mp_drawing.draw_landmarks(image, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS)

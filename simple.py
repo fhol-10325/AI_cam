@@ -236,6 +236,15 @@ def main():
         image = cv2.cvtColor(debug_image, cv2.COLOR_BGR2RGB)
         image.flags.writeable = False  # To improve performance, optionally mark the image as not writeable.
         results = hands.process(image)
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                for landmark in hand_landmarks.landmark:
+                    # Calculate the x and y coordinates
+                    x = int(landmark.x * image.shape[1])
+                    y = int(landmark.y * image.shape[0])
+                    # Draw a circle for each landmark
+                    cv2.circle(debug_image, (x, y), 2, (255, 255, 0), -1)
+
 
         keypoints, scores = run_inference(
             interpreter,
@@ -254,15 +263,7 @@ def main():
             scores,
         )
 
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                for landmark in hand_landmarks.landmark:
-                    # Calculate the x and y coordinates
-                    x = int(landmark.x * image.shape[1])
-                    y = int(landmark.y * image.shape[0])
-                    # Draw a circle for each landmark
-                    cv2.circle(debug_image, (x, y), 4, (255, 255, 0), -1)
-
+        
         key = cv2.waitKey(1)
         if key == 27:  # ESC
             listener.stop()
