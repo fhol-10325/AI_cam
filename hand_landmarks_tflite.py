@@ -69,88 +69,232 @@ def non_max_suppression_fast(boxes, probabilities=None, overlap_threshold=0.3):
     # return only the bounding boxes that were picked
     return pick
 
-def inference(img, input_size, interpreter):
+class HandTracker():
+    r"""
+    Class to use Google's Mediapipe HandTracking pipeline from Python.
+    So far only detection of a single hand is supported.
+    Any any image size and aspect ratio supported.
 
-     # reading the SSD anchors
-    anchors_path = 'anchors.csv'
-    with open(anchors_path, "r") as csv_f:
-        anchors = np.r_[
-            [x for x in csv.reader(csv_f, quoting=csv.QUOTE_NONNUMERIC)]
-        ]
+    Args:
+        palm_model: path to the palm_detection.tflite
+        joint_model: path to the hand_landmark.tflite
+        anchors_path: path to the csv containing SSD anchors
+    Ourput:
+        (21,2) array of hand joints.
+    Examples::
+        >>> det = HandTracker(path1, path2, path3)
+        >>> input_img = np.random.randint(0,255, 256*256*3).reshape(256,256,3)
+        >>> keypoints, bbox = det(input_img)
+    """
 
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, dsize=(input_size, input_size))
-    img = img.astype(np.float32)
-    img = (img / 128) - 1  # Normalize to [-0.5, 0.5]
+    def __init__(self, palm_model, joint_model, anchors_path,
+                box_enlarge=1.5, box_shift=0.2):
+        self.box_shift = box_shift
+        self.box_enlarge = box_enlarge
+        self.hand_3d = True
 
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
+        self.interp_palm = tf.lite.Interpreter(palm_model)
+        self.interp_palm.allocate_tensors()
+        
 
-    in_idx = input_details[0]['index']
-    out_reg_idx = output_details[0]['index']
-    out_clf_idx = output_details[1]['index']
-    #print(output_details)
+        # reading the SSD anchors
+        with open(anchors_path, "r") as csv_f:
+            self.anchors = np.r_[
+                [x for x in csv.reader(csv_f, quoting=csv.QUOTE_NONNUMERIC)]
+            ]
+        # reading tflite model paramteres
+        output_details = self.interp_palm.get_output_details()
+        input_details = self.interp_palm.get_input_details()
 
-    interpreter.set_tensor(in_idx, img[None])
-    interpreter.invoke()
+        self.in_idx = input_details[0]['index']
+        self.out_reg_idx = output_details[0]['index']
+        self.out_clf_idx = output_details[1]['index']
 
-    out_reg = interpreter.get_tensor(out_reg_idx)[0]
-    out_clf = interpreter.get_tensor(out_clf_idx)[0,:,0]
+        # in case of 3d hand tracking, run hand_landmark model
+        if(True):
+            self.interp_joint = tf.lite.Interpreter(joint_model)
+            self.interp_joint.allocate_tensors()
 
-    P = 1/(1 + np.exp(-out_clf))
-    detecion_mask = P > 0.5
-    candidate_detect = out_reg[detecion_mask]
-    print(np.shape(anchors[2016]))
-    candidate_anchors = anchors[detecion_mask]
-    P = P[detecion_mask]
+            self.in_idx_joint = self.interp_joint.get_input_details()[0]['index']
+            self.out_idx_joint = self.interp_joint.get_output_details()[0]['index']
 
-    moved_candidate_detect = candidate_detect.copy()
-    moved_candidate_detect[:, :2] = candidate_detect[:, :2] + (candidate_anchors[:, :2] * 256)
-    box_ids = non_max_suppression_fast(moved_candidate_detect[:, :4], P)
+        # 90° rotation matrix used to create the alignment trianlge
+        self.R90 = np.r_[[[0,1],[-1,0]]]
 
-    # Pick the first detected hand. Could be adapted for multi hand recognition
-    box_ids = box_ids[0]
+        # trianlge target coordinates used to move the detected hand
+        # into the right position
+        self._target_triangle = np.float32([
+                        [128, 128],
+                        [128,   0],
+                        [  0, 128]
+                    ])
+        self._target_box = np.float32([
+                        [  0,   0, 1],
+                        [256,   0, 1],
+                        [256, 256, 1],
+                        [  0, 256, 1],
+                    ])
 
-    # bounding box offsets, width and height
-    dx,dy,w,h = candidate_detect[box_ids, :4]
-    center_wo_offst = candidate_anchors[box_ids,:2] * 256
+    def _get_triangle(self, kp0, kp2, dist=1):
+        """get a triangle used to calculate Affine transformation matrix"""
 
-    # 7 initial keypoints
-    keypoints = center_wo_offst + candidate_detect[box_ids,4:].reshape(-1,2)
-    side = max(w,h) * 1.5
+        dir_v = kp2 - kp0
+        dir_v /= np.linalg.norm(dir_v)
 
-    print(keypoints[0], keypoints[1])
+        dir_v_r = dir_v @ self.R90.T
+        return np.float32([kp2, kp2+dir_v*dist, kp2 + dir_v_r*dist])
 
-    return dx, dy
+    @staticmethod
+    def _triangle_to_bbox(source):
+        # plain old vector arithmetics
+        bbox = np.c_[
+            [source[2] - source[0] + source[1]],
+            [source[1] + source[0] - source[2]],
+            [3 * source[0] - source[1] - source[2]],
+            [source[2] - source[1] + source[0]],
+        ].reshape(-1,2)
+        return bbox
 
+    @staticmethod
+    def _im_normalize(img):
+         return np.ascontiguousarray(
+             2 * ((img / 255) - 0.5
+        ).astype('float32'))
 
-cap_device = 0
-keypoint_score_th = 0.2
+    @staticmethod
+    def _sigm(x):
+        return 1 / (1 + np.exp(-x) )
 
-cap_device = 'Mediacpy/dance.mp4'
-cap = cv2.VideoCapture(cap_device)
-
-cv2.namedWindow('image')
-
-model_path = 'Models/palm_detection_lite.tflite'
-input_size = 192
-
-interpreter = tf.lite.Interpreter(model_path=model_path)
-interpreter.allocate_tensors()
-
-ret, frame = cap.read()
-
-img = copy.deepcopy(frame)
-
-dx, dy = inference(img, input_size, interpreter)
-
-cv2.circle(img, (int(196+dx*196), int(dy*196)), 4, (255, 255, 0), -1)
-
+    @staticmethod
+    def _pad1(x):
+        return np.pad(x, ((0,0),(0,1)), constant_values=1, mode='constant')
 
 
-while True:
-    key = cv2.waitKey(1)
-    if key == 27:  # ESC
-        break
+    def predict_joints(self, img_norm):
+        with tf.device('/cpu:0'):
+            #self.interp_joint.set_tensor(self.in_idx_joint, img_norm.reshape(1,256, 256, 3))
+            self.interp_joint.invoke()
 
-    cv2.imshow('image', img)
+        joints = self.interp_joint.get_tensor(self.out_idx_joint)
+        return joints.reshape(-1,2)
+
+    def detect_hand(self, img_norm):
+        assert -1 <= img_norm.min() and img_norm.max() <= 1,\
+        "img_norm should be in range [-1, 1]"
+        assert img_norm.shape == (256, 256, 3),\
+        "img_norm shape must be (256, 256, 3)"
+
+        # predict hand location and 7 initial landmarks
+        with tf.device('/cpu:0'):
+            #self.interp_palm.set_tensor(self.in_idx, img_norm[None])
+            self.interp_palm.invoke()
+
+        """
+        out_reg shape is [number of anchors, 18]
+        Second dimension 0 - 4 are bounding box offset, width and height: dx, dy, w ,h
+        Second dimension 4 - 18 are 7 hand keypoint x and y coordinates: x1,y1,x2,y2,...x7,y7
+        """
+        out_reg = self.interp_palm.get_tensor(self.out_reg_idx)[0]
+        """
+        out_clf shape is [number of anchors]
+        it is the classification score if there is a hand for each anchor box
+        """
+        out_clf = self.interp_palm.get_tensor(self.out_clf_idx)[0,:,0]
+
+        # finding the best prediction
+        probabilities = self._sigm(out_clf)
+        detecion_mask = probabilities > 0.5
+        candidate_detect = out_reg[detecion_mask]
+        candidate_anchors = self.anchors[detecion_mask]
+        probabilities = probabilities[detecion_mask]
+
+        if candidate_detect.shape[0] == 0:
+            print("No hands found")
+            return None, None, None
+
+        # Pick the best bounding box with non maximum suppression
+        # the boxes must be moved by the corresponding anchor first
+        moved_candidate_detect = candidate_detect.copy()
+        moved_candidate_detect[:, :2] = candidate_detect[:, :2] + (candidate_anchors[:, :2] * 256)
+        box_ids = non_max_suppression_fast(moved_candidate_detect[:, :4], probabilities)
+
+        # Pick the first detected hand. Could be adapted for multi hand recognition
+        box_ids = box_ids[0]
+
+        # bounding box offsets, width and height
+        dx,dy,w,h = candidate_detect[box_ids, :4]
+        center_wo_offst = candidate_anchors[box_ids,:2] * 256
+
+        # 7 initial keypoints
+        keypoints = center_wo_offst + candidate_detect[box_ids,4:].reshape(-1,2)
+        side = max(w,h) * self.box_enlarge
+
+        # now we need to move and rotate the detected hand for it to occupy a
+        # 256x256 square
+        # line from wrist keypoint to middle finger keypoint
+        # should point straight up
+        # TODO: replace triangle with the bbox directly
+        source = self._get_triangle(keypoints[0], keypoints[2], side)
+        source -= (keypoints[0] - keypoints[2]) * self.box_shift
+
+        debug_info = {
+            "detection_candidates": candidate_detect,
+            "anchor_candidates": candidate_anchors,
+            "selected_box_id": box_ids,
+        }
+
+        return source, keypoints, debug_info
+
+    def preprocess_img(self, img):
+        # fit the image into a 256x256 square
+        shape = np.r_[img.shape]
+        pad = (shape.max() - shape[:2]).astype('uint32') // 2
+        img_pad = np.pad(
+            img,
+            ((pad[0],pad[0]), (pad[1],pad[1]), (0,0)),
+            mode='constant')
+        img_small = cv2.resize(img_pad, (256, 256))
+        img_small = np.ascontiguousarray(img_small)
+
+        img_norm = self._im_normalize(img_small)
+        return img_pad, img_norm, pad
+
+
+    def __call__(self, img):
+        img_pad, img_norm, pad = self.preprocess_img(img)
+
+        source, keypoints, _ = self.detect_hand(img_norm)
+        if source is None:
+            return None, None
+
+        # calculating transformation from img_pad coords
+        # to img_landmark coords (cropped hand image)
+        scale = max(img.shape) / 256
+        Mtr = cv2.getAffineTransform(
+            source * scale,
+            self._target_triangle
+        )
+        if(self.hand_3d==True):
+            img_landmark = cv2.warpAffine(
+                self._im_normalize(img_pad), Mtr, (256,256)
+            )
+
+        # adding the [0,0,1] row to make the matrix square
+        Mtr = self._pad1(Mtr.T).T
+        Mtr[2,:2] = 0
+
+        Minv = np.linalg.inv(Mtr)
+
+        kp_orig = []
+        if(self.hand_3d==True):
+            joints = self.predict_joints(img_landmark)
+            kp_orig = (self._pad1(joints) @ Minv.T)[:,:2]
+            kp_orig -= pad[::-1]
+
+
+        # projecting keypoints back into original image coordinate space
+        
+        box_orig = (self._target_box @ Minv.T)[:,:2]
+        box_orig -= pad[::-1]
+
+        return kp_orig, box_orig
